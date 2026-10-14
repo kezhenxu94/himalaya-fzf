@@ -1,0 +1,288 @@
+#!/usr/bin/env zsh
+
+SCRIPT_FILE=$(realpath "$0")
+
+_run_fzf_picker() {
+  local state_file=$(mktemp)
+  echo "hidden" > "$state_file"
+  trap 'rm -f "$state_file"' EXIT
+  fzf --layout=reverse --info='inline: | ' --pointer=' ' --scrollbar='' \
+    --preview-window=hidden,right,border-left,wrap "$@" \
+    --bind="ctrl-p:toggle-preview+transform([[ \$(cat $state_file) = hidden ]] && echo visible > $state_file || echo hidden > $state_file)" \
+    --bind="ctrl-u:transform([[ \$(cat $state_file) = visible ]] && echo preview-half-page-up || echo half-page-up)" \
+    --bind="ctrl-d:transform([[ \$(cat $state_file) = visible ]] && echo preview-half-page-down || echo half-page-down)" \
+    --bind="ctrl-f:transform([[ \$(cat $state_file) = visible ]] && echo preview-page-down || echo page-down)"
+}
+
+_view_in_editor() {
+  ${VISUAL:-${EDITOR:-vim}} -R -c "set nomodifiable" -c "set ft=mail" -c "nnoremap q :q<CR>" "$@"
+}
+
+_pause() {
+  read -sk1 '?Press any key to continue...'
+}
+
+# Runs himalaya against the account selected via HIF_ACCOUNT (default account when unset).
+_hi() {
+  himalaya ${HIF_ACCOUNT:+-a "$HIF_ACCOUNT"} "$@"
+}
+
+_current_account() {
+  echo "${HIF_ACCOUNT:-$(himalaya account list --json 2>/dev/null | jq -r '.accounts[] | select(.default).name')}"
+}
+
+_list_accounts() {
+  printf 'NAME\t%-24s  %-8s  %s\n' 'NAME' 'DEFAULT' 'BACKENDS'
+  _hi account list --json 2>/dev/null |
+    jq -r '.accounts[] | [.name, .name, (if .default then "yes" else "" end), (.backends | join(","))] | @tsv' |
+    awk -F'\t' '{printf "%s\t%-24s  %-8s  %s\n", $1, $2, $3, $4}'
+}
+
+_list_mailboxes() {
+  printf 'ID\t%-32s  %-8s  %8s  %8s\n' 'NAME' 'ROLE' 'UNREAD' 'TOTAL'
+  _hi mailbox list --counts --json 2>/dev/null |
+    jq -r '.mailboxes | sort_by(.role != "inbox", .name)[] | [.id, .name, (.role // ""), .unread, .total] | @tsv' |
+    awk -F'\t' '{printf "%s\t%-32s  %-8s  %8s  %8s\n", $1, $2, $3, $4, $5}'
+}
+
+# Lists envelopes of a mailbox, or searches them when a query is given.
+# Flags column: N (unread), ! (flagged), R (replied).
+_list_envelopes() {
+  local mb="$1"; shift
+  local query="$*" subcmd=(envelope list) who=from
+  if [[ -n "$query" ]]; then
+    subcmd=(envelope search)
+    [[ "$query" == *"order by"* ]] || query+=" order by date desc"
+  fi
+  [[ "${mb:l}" == *sent* ]] && who=to
+  printf 'ID\tFLG\t%-16s  %-24s  %s\n' 'DATE' "${who:u}" 'SUBJECT'
+  _hi $subcmd -m "$mb" -s "${HIF_PAGE_SIZE:-100}" --json ${=query} 2>/dev/null |
+    jq -r --arg who "$who" '.envelopes[] | (.flags | map(.iana)) as $f | [
+      .id,
+      ((if $f | index("seen") then " " else "N" end) + (if $f | index("flagged") then "!" else " " end) + (if $f | index("answered") then "R" else " " end)),
+      (.date[:16] | sub("T"; " ")),
+      (.[$who][0] | .name // .email // "" | .[:24]),
+      (.subject // "")
+    ] | @tsv' |
+    awk -F'\t' '{printf "%s\t%s\t%-16s  %-24s  %s\n", $1, $2, $3, $4, $5}'
+}
+
+_select_mailbox() {
+  _list_mailboxes | _run_fzf_picker --header-lines=1 --delimiter='\t' --with-nth=2.. \
+    --prompt="[$(_current_account)] $1> " \
+    --bind='enter:become:(echo {1})'
+}
+
+# Renders a message as plain text, converting HTML-only bodies with html2text.
+_render_message() {
+  local json
+  json=$(_hi message read --json "$@") || return
+  jq -r '
+    def addrs: map(if .name then "\(.name) <\(.email)>" else .email end) | join(", ");
+    .headers as $h
+    | "From: \($h.from | addrs)", "To: \($h.to | addrs)",
+      (if ($h.cc | length) > 0 then "Cc: \($h.cc | addrs)" else empty end),
+      "Date: \($h.date)", "Subject: \($h.subject)",
+      (.parts[] | select(.role == "attachment") | "Attachment: \(.filename // .mime) (\(.size) bytes)"),
+      ""' <<< "$json"
+  if jq -e '(.text // "") != ""' <<< "$json" >/dev/null; then
+    jq -r '.text | gsub("\r"; "")' <<< "$json"
+  else
+    jq -r '.html // ""' <<< "$json" | html2text
+  fi
+}
+
+_view_message() {
+  local mb="$1" id="$2"
+  _render_message --seen -m "$mb" "$id" | _view_in_editor - > /dev/tty
+}
+
+_toggle_flag() {
+  local mb="$1" flag="$2" current="$3"; shift 3
+  local op=add
+  case "$flag" in
+    seen) [[ "$current" == *N* ]] || op=remove ;;
+    flagged) [[ "$current" == *'!'* ]] && op=remove ;;
+  esac
+  _hi flag $op -m "$mb" -f "$flag" "$@" >/dev/null
+}
+
+_delete_messages() {
+  local mb="$1"; shift
+  read -q "?Move $# message(s) to trash? (y/N): " && _hi message delete -m "$mb" "$@"
+  echo
+}
+
+_move_messages() {
+  local mb="$1"; shift
+  local dest=$(_select_mailbox "move $# message(s) to")
+  [[ -n "$dest" ]] && _hi message move -f "$mb" -t "$dest" "$@"
+}
+
+# Edits a plain-text draft (headers + body) in the editor, then sends it via himalaya.
+# mode: compose | reply
+_compose() {
+  local mode="$1" mb="$2" id="$3"
+  local dir=$(mktemp -d)
+  local draft="$dir/draft.eml" body="$dir/body"
+  local fields='{"to":[],"cc":[],"bcc":[],"subject":"","body":""}'
+  if [[ "$mode" != compose ]]; then
+    fields=$(_hi message $mode -m "$mb" "$id" --json --body '' </dev/null) || { _pause; return 1; }
+  fi
+  jq -r '"To: \(.to | join(", "))\nCc: \(.cc | join(", "))\nBcc: \(.bcc | join(", "))\nSubject: \(.subject)\n\n\n\n\(.body | gsub("\r"; ""))"' \
+    <<< "$fields" > "$draft"
+
+  local to cc bcc subject answer
+  while true; do
+    ${VISUAL:-${EDITOR:-vim}} -c 'set ft=mail' "$draft" < /dev/tty > /dev/tty
+    to=$(sed -n '1,/^$/s/^To: *//p' "$draft")
+    cc=$(sed -n '1,/^$/s/^Cc: *//p' "$draft")
+    bcc=$(sed -n '1,/^$/s/^Bcc: *//p' "$draft")
+    subject=$(sed -n '1,/^$/s/^Subject: *//p' "$draft")
+    sed '1,/^$/d' "$draft" > "$body"
+    [[ -z "$to" ]] && echo "No recipient (To:) given."
+    read -k1 "answer?Send to '$to'? [y]es / [e]dit / [N]o: "; echo
+    case "$answer" in
+      [yY]) [[ -n "$to" ]] && break ;;
+      [eE]) ;;
+      *) echo "Draft kept at $draft"; _pause; return ;;
+    esac
+  done
+
+  local args=(-t "$to" -s "$subject" --body-file "$body" --send)
+  [[ -n "$cc" ]] && args+=(--cc "$cc")
+  [[ -n "$bcc" ]] && args+=(--bcc "$bcc")
+  if [[ "$mode" == compose ]]; then
+    _hi message compose $args
+  else
+    _hi message $mode -m "$mb" "$id" -P none $args
+  fi
+  if [[ $? -eq 0 ]]; then
+    rm -rf "$dir"
+    echo 'Sent.'
+  else
+    echo "Failed to send, draft kept at $draft"
+  fi
+  _pause
+}
+
+_browse_accounts() {
+  : | _run_fzf_picker --header-lines=1 --delimiter='\t' --with-nth=2.. \
+    --prompt="[$(_current_account)] accounts> " \
+    --header=$'>> enter (switch) | C-p (check) | esc (back) <<\n' \
+    --bind="start:reload:source $SCRIPT_FILE && _list_accounts" \
+    --bind="enter:become(export HIF_ACCOUNT={1}; source $SCRIPT_FILE && _browse_mailboxes)" \
+    --bind="esc:become(source $SCRIPT_FILE && _show_main_menu)" \
+    --preview='himalaya -a {1} account check'
+}
+
+_browse_mailboxes() {
+  local list="source $SCRIPT_FILE && _list_mailboxes"
+  : | _run_fzf_picker --header-lines=1 --delimiter='\t' --with-nth=2.. \
+    --prompt="[$(_current_account)] mailboxes> " \
+    --header=$'>> enter (envelopes) | C-n (compose) | C-a (accounts) | C-r (reload) | C-p (preview) | esc (back) <<\n' \
+    --bind="start:reload:$list" \
+    --bind="ctrl-r:reload:$list" \
+    --bind="enter:become(source $SCRIPT_FILE && _browse_envelopes {1})" \
+    --bind="ctrl-n:execute(source $SCRIPT_FILE && _compose compose)+reload($list)" \
+    --bind="ctrl-a:become(source $SCRIPT_FILE && _browse_accounts)" \
+    --bind="esc:become(source $SCRIPT_FILE && _show_main_menu)" \
+    --preview="source $SCRIPT_FILE && _hi envelope list -m {1} -s 30 -w \$FZF_PREVIEW_COLUMNS"
+}
+
+_browse_envelopes() {
+  local mb="${1:-inbox}"
+  local mbq=${(q)mb}
+  local list="source $SCRIPT_FILE && _list_envelopes $mbq"
+  local title="[$(_current_account)] $mb"
+  local prompt="$title> "
+  local run="source $SCRIPT_FILE &&"
+  : | _run_fzf_picker --header-lines=1 --delimiter='\t' --with-nth=2.. --tabstop=1 --multi \
+    --prompt="$prompt" \
+    --ghost='type to filter, or type a query (e.g. from alice and subject report) then C-q to search on server' \
+    --header=$'>> enter (view) | C-e (reply) | C-n (compose) | C-k (read/unread) | C-s (flag) | C-o (move) | C-x (delete) | C-q (server search) | C-r (reload) | C-p (preview) | C-a (accounts) | tab (multi-select) | esc (mailboxes) <<\n' \
+    --bind="start:reload:$list" \
+    --bind="ctrl-r:reload($list)+change-prompt($prompt)" \
+    --bind="ctrl-q:transform-prompt(printf '%s (search: %s)> ' ${(q)title} {q})+reload($list {q})+clear-query" \
+    --bind="enter:execute($run _view_message $mbq {1})+reload($list)" \
+    --bind="ctrl-e:execute($run _compose reply $mbq {1})+reload($list)" \
+    --bind="ctrl-n:execute($run _compose compose)+reload($list)" \
+    --bind="ctrl-k:execute-silent($run _toggle_flag $mbq seen {2} {+1})+clear-multi+reload($list)" \
+    --bind="ctrl-s:execute-silent($run _toggle_flag $mbq flagged {2} {+1})+clear-multi+reload($list)" \
+    --bind="ctrl-o:execute($run _move_messages $mbq {+1})+clear-multi+reload($list)" \
+    --bind="ctrl-x:execute($run _delete_messages $mbq {+1})+clear-multi+reload($list)" \
+    --bind="ctrl-a:become($run _browse_accounts)" \
+    --bind="esc:become($run _browse_mailboxes)" \
+    --preview="$run _render_message -m $mbq {1}"
+}
+
+_show_main_menu() {
+  local menu_items=(
+    "[account]  Accounts"
+    "[mailbox]  Mailboxes"
+    "[envelope] Envelopes (Inbox)"
+    "[message]  Compose a message"
+  )
+
+  printf '%s\n' "${menu_items[@]}" |
+    _run_fzf_picker \
+      --prompt="[$(_current_account)] hif> " \
+      --ghost='select a resource | Enter (navigate) | Esc (exit)' \
+      --header=$'>> Himalaya Fuzzy - Interactive mail client <<\n' \
+      --bind="enter:execute(
+        [[ '{1}' == '[message]'* ]] && source $SCRIPT_FILE && _compose compose
+      )+become(
+        case '{1}' in
+          '[account]'*) source $SCRIPT_FILE && _browse_accounts ;;
+          '[mailbox]'*) source $SCRIPT_FILE && _browse_mailboxes ;;
+          '[envelope]'*) source $SCRIPT_FILE && _browse_envelopes ;;
+          '[message]'*) source $SCRIPT_FILE && _show_main_menu ;;
+        esac
+      )"
+}
+
+hif() {
+  local cmd
+  for cmd in himalaya fzf jq html2text; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "Error: $cmd is not installed or not in PATH" >&2
+      exit 1
+    fi
+  done
+
+  if [[ "$1" == -a ]]; then
+    export HIF_ACCOUNT="$2"
+    shift 2
+  fi
+
+  case "${1:-}" in
+    a|account|accounts) _browse_accounts ;;
+    m|mailbox|mailboxes) _browse_mailboxes ;;
+    e|envelope|envelopes) _browse_envelopes "$2" ;;
+    c|compose) _compose compose ;;
+    ""|menu) _show_main_menu ;;
+    -h|--help|help)
+      echo "Usage: hif [-a ACCOUNT] [command]"
+      echo ""
+      echo "Commands:"
+      echo "  a, accounts            Account browser"
+      echo "  m, mailboxes           Mailbox browser"
+      echo "  e, envelopes [MAILBOX] Envelope browser (default: inbox)"
+      echo "  c, compose             Compose a message"
+      echo ""
+      echo "Run without arguments for interactive menu."
+      echo "Env: HIF_ACCOUNT (account), HIF_PAGE_SIZE (envelopes per page, default 100)"
+      ;;
+    *)
+      echo "Unknown command: $1" >&2
+      echo "Run 'hif --help' for usage." >&2
+      exit 1
+      ;;
+  esac
+}
+
+# Only run when executed directly (not when sourced)
+(
+  [[ -n $ZSH_VERSION && $ZSH_EVAL_CONTEXT =~ :file$ ]] ||
+  [[ -n $BASH_VERSION ]] && (return 0 2>/dev/null)
+) || hif "$@"
