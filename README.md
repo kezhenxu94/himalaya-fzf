@@ -8,6 +8,7 @@ An interactive mail client built on [himalaya](https://github.com/pimalaya/himal
 - [fzf](https://github.com/junegunn/fzf) 0.48 or later
 - [jq](https://github.com/jqlang/jq)
 - [html2text](https://github.com/Alir3z4/html2text), to render HTML-only messages
+- python3, to parse messages; `hif-open-html` (in this repo) opens them in a browser
 
 ## Install
 
@@ -30,6 +31,9 @@ hif -a work e          # Use a specific account
 |-----------------|------------------------------------------|
 | `HIF_ACCOUNT`   | Account to use (default account if unset) |
 | `HIF_PAGE_SIZE` | Envelopes per page (default: 100)        |
+| `HIF_BROWSER`   | Command `C-w` opens pages with (default: `open` / `xdg-open`) |
+| `HIF_MAIL_DIR`  | Where `C-w` saves messages and attachments (default: `$TMPDIR/hif-mail`) |
+| `HIF_REMOTE_IMAGES` | `1` lets `C-w` pages load remote images (default: blocked) |
 
 Messages are viewed and composed in `$VISUAL` / `$EDITOR`.
 
@@ -45,6 +49,8 @@ Messages are viewed and composed in `$VISUAL` / `$EDITOR`.
 | `Ctrl+S` | Toggle flagged                            |
 | `Ctrl+O` | Move to mailbox                           |
 | `Ctrl+X` | Delete (to trash)                         |
+| `Ctrl+W` | Open in browser, with attachments         |
+| `Alt+A`  | Archive                                   |
 | `Ctrl+Q` | Search on server with the typed query     |
 | `Ctrl+R` | Reload                                    |
 | `Ctrl+A` | Switch account                            |

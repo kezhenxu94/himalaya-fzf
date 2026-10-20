@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# hif-open-html - open one email in a browser, with its attachments and inline images.
+#
+# Usage: hif-open-html <account> <message-id> [mailbox]
+#   hif-open-html work 18c0ffee00000000
+#   hif-open-html home 42 Archive
+# Saves $HIF_MAIL_DIR/<account>_<id>/ (default $TMPDIR/hif-mail): message.html
+# plus every attachment. Adds a header bar linking each attachment, marks the
+# email as read, and opens the page with $HIF_BROWSER (default open/xdg-open).
+# Scripts never run; remote images load only with HIF_REMOTE_IMAGES=1.
+
+set -euo pipefail
+
+usage() { sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0"; }
+case "${1:-}" in
+-h | --help) sed -n '4,6s/^# \{0,1\}//p' "$0"; exit 0 ;;
+help) usage; exit 0 ;;
+esac
+[ "$#" -ge 2 ] && [ "$#" -le 3 ] || { usage >&2; exit 2; }
+
+account="$1" id="$2"
+mailbox_args=()
+[ "$#" -eq 3 ] && mailbox_args=(-m "$3")
+
+dir="${HIF_MAIL_DIR:-${TMPDIR:-/tmp}/hif-mail}/${account}_${id}"
+mkdir -p "$dir"
+
+# himalaya prints its errors on stdout, so show the captured file when it fails.
+if ! RUST_LOG="${RUST_LOG:-error}" himalaya message read -a "$account" ${mailbox_args[@]+"${mailbox_args[@]}"} \
+  --raw --seen "$id" >"$dir/message.eml"; then
+  cat "$dir/message.eml" >&2
+  rm -rf "$dir"
+  exit 1
+fi
+
+python3 -I - "$dir" "${HIF_REMOTE_IMAGES:-0}" <<'PY'
+import email, html, os, re, sys
+from email import policy
+
+out, remote_images = sys.argv[1], sys.argv[2] == "1"
+msg = email.message_from_binary_file(open(os.path.join(out, "message.eml"), "rb"), policy=policy.default)
+
+
+def safe_name(name, used):
+    name = re.sub(r"[^\w.\- ]+", "_", os.path.basename(name)).strip() or "attachment"
+    base, ext = os.path.splitext(name)
+    n, candidate = 1, name
+    while candidate in used or candidate == "message.html":
+        n += 1
+        candidate = f"{base}_{n}{ext}"
+    used.add(candidate)
+    return candidate
+
+
+# Save every non-body part: real attachments and inline images (Content-ID).
+body = msg.get_body(("html", "plain"))
+used, links, cids = set(), [], {}
+for part in msg.walk():
+    if part.is_multipart() or part is body or part.get_content_type() in ("text/plain", "text/html") and not part.get_filename():
+        continue
+    data = part.get_payload(decode=True)
+    if data is None:
+        continue
+    ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif"}.get(part.get_content_type(), "")
+    name = safe_name(part.get_filename() or f"part{len(used) + 1}{ext}", used)
+    open(os.path.join(out, name), "wb").write(data)
+    cid = (part["Content-ID"] or "").strip("<> ")
+    if cid:
+        cids[cid] = name
+    if part.get_content_disposition() == "attachment" or (part.get_filename() and not cid):
+        links.append((name, len(data)))
+
+if body is None:
+    content = "<p>(no text body)</p>"
+elif body.get_content_type() == "text/html":
+    content = body.get_content()
+    for cid, name in cids.items():
+        content = re.sub(rf"cid:{re.escape(cid)}", name, content, flags=re.I)
+else:
+    content = "<pre style='white-space:pre-wrap'>" + html.escape(body.get_content()) + "</pre>"
+
+rows = "".join(
+    f"<div><b>{h}:</b> {html.escape(str(msg[h]))}</div>" for h in ("From", "To", "Cc", "Date", "Subject") if msg[h]
+)
+files = " ".join(
+    f"<a href='{html.escape(n)}' target='_blank'>📎 {html.escape(n)}</a> ({size // 1024 or 1} KB)" for n, size in links
+)
+bar = (
+    "<div style='font:14px system-ui,sans-serif;background:#f3f3f3;color:#222;"
+    "border-bottom:1px solid #ccc;padding:10px 14px;margin:0 0 12px'>"
+    f"{rows}{'<div style=margin-top:6px>' + files + '</div>' if files else ''}</div>"
+)
+m = re.search(r"<body[^>]*>", content, flags=re.I)
+page = content[: m.end()] + bar + content[m.end() :] if m else "<meta charset='utf-8'>" + bar + content
+# Block scripts, frames and tracking: only local files load unless remote images are asked for.
+remote = " https: http:" if remote_images else ""
+csp = (
+    "default-src 'none'; script-src 'none'; frame-src 'none'; form-action 'none'; "
+    f"img-src 'self' file: data:{remote}; style-src 'self' 'unsafe-inline' file:{remote}; font-src 'self' file: data:{remote}"
+)
+meta = f'<meta http-equiv="Content-Security-Policy" content="{csp}">'
+# Inside <head> when there is one; never before <!DOCTYPE>, which would force quirks mode.
+m = re.search(r"<head[^>]*>", page, flags=re.I) or re.search(r"<!doctype[^>]*>", page, flags=re.I)
+page = page[: m.end()] + meta + page[m.end() :] if m else meta + page
+open(os.path.join(out, "message.html"), "w").write(page)
+PY
+
+if [ -n "${HIF_BROWSER:-}" ]; then
+  $HIF_BROWSER "$dir/message.html"
+elif command -v open >/dev/null; then
+  open "$dir/message.html"
+else
+  xdg-open "$dir/message.html" >/dev/null 2>&1 &
+fi
+echo "$dir/message.html"
