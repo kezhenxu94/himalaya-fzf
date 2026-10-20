@@ -29,6 +29,11 @@ _hi() {
   himalaya ${HIF_ACCOUNT:+-a} ${HIF_ACCOUNT:+"$HIF_ACCOUNT"} "$@"
 }
 
+_is_gmail_api_account() {
+  himalaya account list --json 2>/dev/null |
+    jq -e --arg a "$(_current_account)" '.accounts[] | select(.name == $a) | .backends | index("gmail")' >/dev/null
+}
+
 _current_account() {
   echo "${HIF_ACCOUNT:-$(himalaya account list --json 2>/dev/null | jq -r '.accounts[] | select(.default).name')}"
 }
@@ -76,22 +81,55 @@ _select_mailbox() {
 }
 
 # Renders a message as plain text, converting HTML-only bodies with html2text.
+# Parses the raw RFC 5322 bytes: himalaya v2.2.1's `message read --json` has no
+# headers/text/html fields, only mail-parser's internal structure.
 _render_message() {
-  local json
-  json=$(_hi message read --json "$@") || return
-  jq -r '
-    def addrs: map(if .name then "\(.name) <\(.email)>" else .email end) | join(", ");
-    .headers as $h
-    | "From: \($h.from | addrs)", "To: \($h.to | addrs)",
-      (if ($h.cc | length) > 0 then "Cc: \($h.cc | addrs)" else empty end),
-      "Date: \($h.date)", "Subject: \($h.subject)",
-      (.parts[] | select(.role == "attachment") | "Attachment: \(.filename // .mime) (\(.size) bytes)"),
-      ""' <<< "$json"
-  if jq -e '(.text // "") != ""' <<< "$json" >/dev/null; then
-    jq -r '.text | gsub("\r"; "")' <<< "$json"
-  else
-    jq -r '.html // ""' <<< "$json" | html2text
+  _hi message read --raw "$@" 2>/dev/null | python3 -I -c '
+import email, subprocess, sys
+from email import policy
+m = email.message_from_binary_file(sys.stdin.buffer, policy=policy.default)
+for h in ("From", "To", "Cc", "Date", "Subject"):
+    if m[h]:
+        print(f"{h}: {m[h]}")
+for part in m.iter_attachments():
+    print(f"Attachment: {part.get_filename() or part.get_content_type()}")
+print()
+body = m.get_body(("plain", "html"))
+if body is None:
+    sys.exit()
+text = body.get_content()
+if body.get_content_type() == "text/html":
+    text = subprocess.run(["html2text"], input=text, capture_output=True, text=True).stdout
+print(text.replace("\r", ""))
+'
+}
+
+# Archives messages: Gmail API accounts drop the INBOX label (the message stays in All
+# Mail); others move to an `Archive` or `[Gmail]/All Mail` mailbox.
+_archive_messages() {
+  local mb="$1"; shift
+  local account=$(_current_account) dest
+  if _is_gmail_api_account; then
+    _hi gmail messages batch-modify --remove-label INBOX "$@" >/dev/null
+    return
   fi
+  dest=$(_hi mailbox list --json 2>/dev/null |
+    jq -r '[.mailboxes[].id | select(ascii_downcase == "archive" or . == "[Gmail]/All Mail")][0] // empty')
+  if [[ -z "$dest" ]]; then
+    echo "No Archive mailbox in account $account" >&2
+    _pause
+    return 1
+  fi
+  _hi message move -f "$mb" -t "$dest" "$@" >/dev/null
+}
+
+# Opens each message in the browser with its attachments (hif-open-html, next to this script).
+_open_in_browser() {
+  local mb="$1" account; shift
+  account=$(_current_account)
+  for id in "$@"; do
+    "${SCRIPT_FILE:h}/hif-open-html" "$account" "$id" "$mb" >/dev/null 2>&1
+  done
 }
 
 _view_message() {
@@ -183,8 +221,10 @@ _browse_mailboxes() {
   : | _run_fzf_picker --header-lines=1 --delimiter='\t' --with-nth=2.. \
     --prompt="[$(_current_account)] mailboxes> " \
     --header=$'>> enter (envelopes) | C-n (compose) | C-a (accounts) | C-r (reload) | C-p (preview) | esc (back) <<\n' \
+    --ghost='loading mailboxes…' \
     --bind="start:reload:$list" \
-    --bind="ctrl-r:reload:$list" \
+    --bind="load:change-ghost()" \
+    --bind="ctrl-r:change-ghost(loading mailboxes…)+reload:$list" \
     --bind="enter:become(source $SCRIPT_FILE && _browse_envelopes {1})" \
     --bind="ctrl-n:execute(source $SCRIPT_FILE && _compose compose)+reload($list)" \
     --bind="ctrl-a:become(source $SCRIPT_FILE && _browse_accounts)" \
@@ -198,15 +238,19 @@ _browse_envelopes() {
   local list="source $SCRIPT_FILE && _list_envelopes $mbq"
   local title="[$(_current_account)] $mb"
   local prompt="$title> "
+  local ghost='type to filter, or type a query (e.g. from alice and subject report) then C-q to search on server'
   local run="source $SCRIPT_FILE &&"
   : | _run_fzf_picker --header-lines=1 --delimiter='\t' --with-nth=2.. --tabstop=1 --multi \
     --prompt="$prompt" \
-    --ghost='type to filter, or type a query (e.g. from alice and subject report) then C-q to search on server' \
-    --header=$'>> enter (view) | C-e (reply) | C-n (compose) | C-k (read/unread) | C-s (flag) | C-o (move) | C-x (delete) | C-q (server search) | C-r (reload) | C-p (preview) | C-a (accounts) | tab (multi-select) | esc (mailboxes) <<\n' \
-    --bind="start:reload:$list" \
-    --bind="ctrl-r:reload($list)+change-prompt($prompt)" \
+    --ghost="$ghost" \
+    --header=$'>> enter (view) | C-w (open in browser) | M-a (archive) |C-e (reply) | C-n (compose) | C-k (read/unread) | C-s (flag) | C-o (move) | C-x (delete) | C-q (server search) | C-r (reload) | C-p (preview) | C-a (accounts) | tab (multi-select) | esc (mailboxes) <<\n' \
+    --bind="start:change-ghost(loading $mb…)+reload:$list" \
+    --bind="load:change-ghost($ghost)" \
+    --bind="ctrl-r:change-ghost(loading $mb…)+reload($list)+change-prompt($prompt)" \
     --bind="ctrl-q:transform-prompt(printf '%s (search: %s)> ' ${(q)title} {q})+reload($list {q})+clear-query" \
     --bind="enter:execute($run _view_message $mbq {1})+reload($list)" \
+    --bind="ctrl-w:execute-silent($run _open_in_browser $mbq {+1})+clear-multi+reload($list)" \
+    --bind="alt-a:execute($run _archive_messages $mbq {+1})+clear-multi+reload($list)" \
     --bind="ctrl-e:execute($run _compose reply $mbq {1})+reload($list)" \
     --bind="ctrl-n:execute($run _compose compose)+reload($list)" \
     --bind="ctrl-k:execute-silent($run _toggle_flag $mbq seen {2} {+1})+clear-multi+reload($list)" \
@@ -245,7 +289,7 @@ _show_main_menu() {
 
 hif() {
   local cmd
-  for cmd in himalaya fzf jq html2text; do
+  for cmd in himalaya fzf jq html2text python3; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       echo "Error: $cmd is not installed or not in PATH" >&2
       exit 1
