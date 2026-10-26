@@ -138,7 +138,8 @@ PY
 
 if [ -n "${HIF_BROWSER:-}" ]; then
   $HIF_BROWSER "$dir/message.html"
-elif command -v open >/dev/null; then
+# By OS, not by `command -v open`: on some Linux distros `open` is openvt.
+elif [ "$(uname -s)" = Darwin ]; then
   open "$dir/message.html"
 else
   xdg-open "$dir/message.html" >/dev/null 2>&1 &
