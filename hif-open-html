@@ -4,10 +4,11 @@
 # Usage: hif-open-html <account> <message-id> [mailbox]
 #   hif-open-html work 18c0ffee00000000
 #   hif-open-html home 42 Archive
-# Saves $HIF_MAIL_DIR/<account>_<id>/ (default $TMPDIR/hif-mail): message.html
-# plus every attachment. Adds a header bar listing each attachment (PDFs, images
-# and plain text link directly, other text as a .txt copy), marks the email as
-# read, and opens the page with $HIF_BROWSER (default open/xdg-open).
+# Saves $HIF_MAIL_DIR/<account>_<id>/ (default ~/.cache/hif-mail, private to you,
+# cleared after a week): message.html plus every attachment. Adds a header bar
+# listing each attachment (PDFs, images and plain text link directly, other text
+# as a .txt copy), marks the email as read, and opens the page with $HIF_BROWSER
+# (default open/xdg-open).
 # Scripts never run; remote images load only with HIF_REMOTE_IMAGES=1.
 
 set -euo pipefail
@@ -23,7 +24,20 @@ account="$1" id="$2"
 mailbox_args=()
 [ "$#" -eq 3 ] && mailbox_args=(-m "$3")
 
-dir="${HIF_MAIL_DIR:-${TMPDIR:-/tmp}/hif-mail}/${account}_${id}"
+# Mail stays private: under the user's cache, not a shared /tmp, and readable only by them.
+umask 077
+base="${HIF_MAIL_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/hif-mail}"
+mkdir -p "$base"
+# Refuse a folder someone else made, or a symlink, as could be planted in a shared directory.
+if [ -L "$base" ] || [ ! -O "$base" ]; then
+  echo "hif-open-html: $base is a symlink or not owned by $(id -un), refusing to save mail there" >&2
+  exit 1
+fi
+chmod 700 "$base"
+# Drop messages saved more than a week ago. Only folders holding our message.eml, in case
+# HIF_MAIL_DIR points at a folder with other things in it.
+find "$base" -mindepth 2 -maxdepth 2 -name message.eml -mtime +7 -exec sh -c 'rm -rf "${1%/*}"' _ {} \;
+dir="$base/${account}_${id}"
 mkdir -p "$dir"
 
 # himalaya prints its errors on stdout, so show the captured file when it fails.
