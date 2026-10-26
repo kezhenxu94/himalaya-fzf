@@ -10,6 +10,7 @@
 # as a .txt copy), marks the email as read, and opens the page with $HIF_BROWSER
 # (default open/xdg-open).
 # Scripts never run; remote images load only with HIF_REMOTE_IMAGES=1.
+# Set HIF_BACKEND (e.g. imap) to pass -b to himalaya, as hif does for Gmail's All Mail.
 
 set -euo pipefail
 
@@ -23,6 +24,8 @@ esac
 account="$1" id="$2"
 mailbox_args=()
 [ "$#" -eq 3 ] && mailbox_args=(-m "$3")
+# HIF_BACKEND=imap reads by IMAP id, e.g. Gmail's [Gmail]/All Mail.
+[ -n "${HIF_BACKEND:-}" ] && mailbox_args+=(-b "$HIF_BACKEND")
 
 # Mail stays private: under the user's cache, not a shared /tmp, and readable only by them.
 umask 077

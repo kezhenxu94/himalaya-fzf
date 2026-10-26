@@ -26,12 +26,21 @@ _pause() {
 
 # Runs himalaya against the account selected via HIF_ACCOUNT (default account when unset).
 _hi() {
-  himalaya ${HIF_ACCOUNT:+-a} ${HIF_ACCOUNT:+"$HIF_ACCOUNT"} "$@"
+  himalaya ${HIF_ACCOUNT:+-a} ${HIF_ACCOUNT:+"$HIF_ACCOUNT"} ${HIF_BACKEND:+-b} ${HIF_BACKEND:+"$HIF_BACKEND"} "$@"
 }
+
+# The Gmail API has no All Mail label, so Gmail accounts browse it over IMAP.
+GMAIL_ALL_MAIL='[Gmail]/All Mail'
 
 _is_gmail_api_account() {
   himalaya account list --json 2>/dev/null |
     jq -e --arg a "$(_current_account)" '.accounts[] | select(.name == $a) | .backends | index("gmail")' >/dev/null
+}
+
+# All Mail is browsed over IMAP, so it needs both backends.
+_has_gmail_all_mail() {
+  himalaya account list --json 2>/dev/null |
+    jq -e --arg a "$(_current_account)" '.accounts[] | select(.name == $a) | .backends | index("gmail") and index("imap")' >/dev/null
 }
 
 _current_account() {
@@ -50,6 +59,8 @@ _list_mailboxes() {
   _hi mailbox list --counts --json 2>/dev/null |
     jq -r '.mailboxes | sort_by(.role != "inbox", .name)[] | [.id, .name, (.role // ""), .unread, .total] | @tsv' |
     awk -F'\t' '{printf "%s\t%-32s  %-8s  %8s  %8s\n", $1, $2, $3, $4, $5}'
+  [[ -n "${_HIF_GMAIL_ALL_MAIL:-}" ]] &&
+    printf '%s\t%-32s  %-8s  %8s  %8s\n' "$GMAIL_ALL_MAIL" 'All Mail (archive, via IMAP)' '' '' ''
 }
 
 # Lists envelopes of a mailbox, or searches them when a query is given.
@@ -126,6 +137,11 @@ _archive_mailbox() {
 _archive_messages() {
   local mb="$1"; shift
   local dest out
+  if [[ "$mb" == "$GMAIL_ALL_MAIL" ]]; then
+    echo "Messages in All Mail are already archived" >&2
+    _pause
+    return 1
+  fi
   if _is_gmail_api_account; then
     # himalaya prints its errors on stdout, so keep it to show on failure.
     out=$(_hi gmail messages batch-modify --remove-label INBOX "$@") || { print -r -- "$out"; _pause; return 1; }
@@ -225,6 +241,7 @@ _compose() {
 }
 
 _browse_accounts() {
+  unset HIF_BACKEND
   : | _run_fzf_picker --header-lines=1 --delimiter='\t' --with-nth=2.. \
     --prompt="[$(_current_account)] accounts> " \
     --header=$'>> enter (switch) | C-p (check) | esc (back) <<\n' \
@@ -235,6 +252,9 @@ _browse_accounts() {
 }
 
 _browse_mailboxes() {
+  unset HIF_BACKEND
+  # Checked once per screen; the reloads below read it instead of asking himalaya each time.
+  if _has_gmail_all_mail; then export _HIF_GMAIL_ALL_MAIL=1; else unset _HIF_GMAIL_ALL_MAIL; fi
   local list="source $SCRIPT_FILE && _list_mailboxes"
   : | _run_fzf_picker --header-lines=1 --delimiter='\t' --with-nth=2.. \
     --prompt="[$(_current_account)] mailboxes> " \
@@ -252,6 +272,7 @@ _browse_mailboxes() {
 
 _browse_envelopes() {
   local mb="${1:-inbox}"
+  if [[ "$mb" == "$GMAIL_ALL_MAIL" ]]; then export HIF_BACKEND=imap; else unset HIF_BACKEND; fi
   local mbq=${(q)mb}
   local list="source $SCRIPT_FILE && _list_envelopes $mbq"
   local title="[$(_current_account)] $mb"
