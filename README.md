@@ -5,7 +5,7 @@ An interactive mail client built on [himalaya](https://github.com/pimalaya/himal
 ## Requirements
 
 - [himalaya](https://github.com/pimalaya/himalaya) v2, with at least one account configured
-- [fzf](https://github.com/junegunn/fzf)
+- [fzf](https://github.com/junegunn/fzf) 0.48 or later
 - [jq](https://github.com/jqlang/jq)
 - [html2text](https://github.com/Alir3z4/html2text), to render HTML-only messages
 

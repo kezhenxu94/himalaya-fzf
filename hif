@@ -6,7 +6,9 @@ _run_fzf_picker() {
   local state_file=$(mktemp)
   echo "hidden" > "$state_file"
   trap 'rm -f "$state_file"' EXIT
-  fzf --layout=reverse --info='inline: | ' --pointer=' ' --scrollbar='' \
+  # Bind and preview commands `source` this zsh file, so run them with zsh whatever $SHELL is.
+  fzf --with-shell="$(command -v zsh) -c" \
+    --layout=reverse --info='inline: | ' --pointer=' ' --scrollbar='' \
     --preview-window=hidden,right,border-left,wrap "$@" \
     --bind="ctrl-p:toggle-preview+transform([[ \$(cat $state_file) = hidden ]] && echo visible > $state_file || echo hidden > $state_file)" \
     --bind="ctrl-u:transform([[ \$(cat $state_file) = visible ]] && echo preview-half-page-up || echo half-page-up)" \
