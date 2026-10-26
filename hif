@@ -24,7 +24,7 @@ _pause() {
 
 # Runs himalaya against the account selected via HIF_ACCOUNT (default account when unset).
 _hi() {
-  himalaya ${HIF_ACCOUNT:+-a "$HIF_ACCOUNT"} "$@"
+  himalaya ${HIF_ACCOUNT:+-a} ${HIF_ACCOUNT:+"$HIF_ACCOUNT"} "$@"
 }
 
 _current_account() {
