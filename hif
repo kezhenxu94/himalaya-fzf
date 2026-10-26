@@ -261,7 +261,7 @@ _browse_envelopes() {
   : | _run_fzf_picker --header-lines=1 --delimiter='\t' --with-nth=2.. --tabstop=1 --multi \
     --prompt="$prompt" \
     --ghost="$ghost" \
-    --header=$'>> enter (view) | C-w (open in browser) | M-a (archive) |C-e (reply) | C-n (compose) | C-k (read/unread) | C-s (flag) | C-o (move) | C-x (delete) | C-q (server search) | C-r (reload) | C-p (preview) | C-a (accounts) | tab (multi-select) | esc (mailboxes) <<\n' \
+    --header=$'>> enter (view) | C-w (open in browser) | M-a (archive) | C-e (reply) | C-n (compose) | C-k (read/unread) | C-s (flag) | C-o (move) | C-x (delete) | C-q (server search) | C-r (reload) | C-p (preview) | C-a (accounts) | tab (multi-select) | esc (mailboxes) <<\n' \
     --bind="start:change-ghost(loading $mb…)+reload:$list" \
     --bind="load:change-ghost($ghost)" \
     --bind="ctrl-r:change-ghost(loading $mb…)+reload($list)+change-prompt($prompt)" \
