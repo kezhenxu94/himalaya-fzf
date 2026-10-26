@@ -125,9 +125,10 @@ _archive_mailbox() {
 # Mail); others move to the archive mailbox.
 _archive_messages() {
   local mb="$1"; shift
-  local dest
+  local dest out
   if _is_gmail_api_account; then
-    _hi gmail messages batch-modify --remove-label INBOX "$@" >/dev/null
+    # himalaya prints its errors on stdout, so keep it to show on failure.
+    out=$(_hi gmail messages batch-modify --remove-label INBOX "$@") || { print -r -- "$out"; _pause; return 1; }
     return
   fi
   dest=$(_archive_mailbox)
@@ -136,7 +137,7 @@ _archive_messages() {
     _pause
     return 1
   fi
-  _hi message move -f "$mb" -t "$dest" "$@" >/dev/null
+  out=$(_hi message move -f "$mb" -t "$dest" "$@") || { print -r -- "$out"; _pause; return 1; }
 }
 
 # Opens each message in the browser with its attachments (hif-open-html, next to this script).
@@ -144,7 +145,8 @@ _open_in_browser() {
   local mb="$1" account; shift
   account=$(_current_account)
   for id in "$@"; do
-    "${SCRIPT_FILE:h}/hif-open-html" "$account" "$id" "$mb" >/dev/null 2>&1
+    # Only the saved path goes to stdout; errors stay on the terminal until a key is pressed.
+    "${SCRIPT_FILE:h}/hif-open-html" "$account" "$id" "$mb" >/dev/null || { _pause; return 1; }
   done
 }
 
@@ -265,7 +267,7 @@ _browse_envelopes() {
     --bind="ctrl-r:change-ghost(loading $mb…)+reload($list)+change-prompt($prompt)" \
     --bind="ctrl-q:transform-prompt(printf '%s (search: %s)> ' ${(q)title} {q})+reload($list {q})+clear-query" \
     --bind="enter:execute($run _view_message $mbq {1})+reload($list)" \
-    --bind="ctrl-w:execute-silent($run _open_in_browser $mbq {+1})+clear-multi+reload($list)" \
+    --bind="ctrl-w:execute($run _open_in_browser $mbq {+1})+clear-multi+reload($list)" \
     --bind="alt-a:execute($run _archive_messages $mbq {+1})+clear-multi+reload($list)" \
     --bind="ctrl-e:execute($run _compose reply $mbq {1})+reload($list)" \
     --bind="ctrl-n:execute($run _compose compose)+reload($list)" \
