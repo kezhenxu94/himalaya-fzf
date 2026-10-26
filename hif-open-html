@@ -5,8 +5,9 @@
 #   hif-open-html work 18c0ffee00000000
 #   hif-open-html home 42 Archive
 # Saves $HIF_MAIL_DIR/<account>_<id>/ (default $TMPDIR/hif-mail): message.html
-# plus every attachment. Adds a header bar linking each attachment, marks the
-# email as read, and opens the page with $HIF_BROWSER (default open/xdg-open).
+# plus every attachment. Adds a header bar listing each attachment (PDFs, images
+# and plain text link directly, other text as a .txt copy), marks the email as
+# read, and opens the page with $HIF_BROWSER (default open/xdg-open).
 # Scripts never run; remote images load only with HIF_REMOTE_IMAGES=1.
 
 set -euo pipefail
@@ -68,7 +69,8 @@ for part in msg.walk():
     if cid:
         cids[cid] = name
     if part.get_content_disposition() == "attachment" or (part.get_filename() and not cid):
-        links.append((name, len(data)))
+        ctype = part.get_content_type()
+        links.append((name, len(data), part.get_content_maintype() == "text" or ctype.endswith(("xml", "json"))))
 
 if body is None:
     content = "<p>(no text body)</p>"
@@ -82,9 +84,25 @@ else:
 rows = "".join(
     f"<div><b>{h}:</b> {html.escape(str(msg[h]))}</div>" for h in ("From", "To", "Cc", "Date", "Subject") if msg[h]
 )
-files = " ".join(
-    f"<a href='{html.escape(n)}' target='_blank'>📎 {html.escape(n)}</a> ({size // 1024 or 1} KB)" for n, size in links
-)
+# Attachments open as their own pages, outside the CSP, and browsers render unknown types
+# (.html, .svg, .md, no extension, ...) as HTML. Link only types that never run scripts.
+VIEWABLE = {".pdf", ".txt", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+def attachment(name, size, is_text):
+    label = f"📎 {html.escape(name)} ({size // 1024 or 1} KB"
+    if os.path.splitext(name)[1].lower() in VIEWABLE:
+        return f"<a href='{html.escape(name)}' target='_blank'>{label})</a>"
+    if is_text:
+        copy = safe_name(name + ".txt", used)
+        open(os.path.join(out, copy), "wb").write(open(os.path.join(out, name), "rb").read())
+        return f"<a href='{html.escape(copy)}' target='_blank'>{label}, as text)</a>"
+    return f"{label}, saved in the folder)"
+
+
+files = " ".join(attachment(*link) for link in links)
+if files:
+    files += f"<div style='color:#666'>Saved in {html.escape(out)}</div>"
 bar = (
     "<div style='font:14px system-ui,sans-serif;background:#f3f3f3;color:#222;"
     "border-bottom:1px solid #ccc;padding:10px 14px;margin:0 0 12px'>"
