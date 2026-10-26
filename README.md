@@ -34,6 +34,7 @@ hif -a work e          # Use a specific account
 | `HIF_BROWSER`   | Command `C-w` opens pages with (default: `open` / `xdg-open`) |
 | `HIF_MAIL_DIR`  | Where `C-w` saves messages and attachments (default: `~/.cache/hif-mail`; saved mail is removed after a week) |
 | `HIF_REMOTE_IMAGES` | `1` lets `C-w` pages load remote images (default: blocked) |
+| `HIF_SAVE_ATTACHMENTS` | `0` makes `C-w` save no attachments or inline images, only list them (default: saved) |
 
 Messages are viewed and composed in `$VISUAL` / `$EDITOR`.
 
