@@ -108,19 +108,31 @@ print(text.replace("\r", ""))
 '
 }
 
+# The account's archive mailbox. By role first: the backend's `archive` role, else the IMAP
+# special-use flag \Archive, else \All (Gmail's All Mail, whatever its localized name).
+# Then by name, for servers that flag neither (iCloud's `Archive`).
+_archive_mailbox() {
+  local mailboxes dest
+  mailboxes=$(_hi mailbox list --json 2>/dev/null)
+  dest=$(jq -r '[.mailboxes[] | select(.role == "archive") | .id][0] // empty' <<< "$mailboxes" 2>/dev/null)
+  [[ -z "$dest" ]] && dest=$(_hi imap list --all --json 2>/dev/null |
+    jq -r '.mailboxes | [(.[] | select(.attributes | index("\\Archive"))), (.[] | select(.attributes | index("\\All")))][0].name // empty' 2>/dev/null)
+  [[ -z "$dest" ]] && dest=$(jq -r '[.mailboxes[].id | select(ascii_downcase == "archive")][0] // empty' <<< "$mailboxes" 2>/dev/null)
+  print -r -- "$dest"
+}
+
 # Archives messages: Gmail API accounts drop the INBOX label (the message stays in All
-# Mail); others move to an `Archive` or `[Gmail]/All Mail` mailbox.
+# Mail); others move to the archive mailbox.
 _archive_messages() {
   local mb="$1"; shift
-  local account=$(_current_account) dest
+  local dest
   if _is_gmail_api_account; then
     _hi gmail messages batch-modify --remove-label INBOX "$@" >/dev/null
     return
   fi
-  dest=$(_hi mailbox list --json 2>/dev/null |
-    jq -r '[.mailboxes[].id | select(ascii_downcase == "archive" or . == "[Gmail]/All Mail")][0] // empty')
+  dest=$(_archive_mailbox)
   if [[ -z "$dest" ]]; then
-    echo "No Archive mailbox in account $account" >&2
+    echo "No archive mailbox in account $(_current_account)" >&2
     _pause
     return 1
   fi
