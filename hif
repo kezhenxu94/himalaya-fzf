@@ -81,10 +81,13 @@ _select_mailbox() {
 }
 
 # Renders a message as plain text, converting HTML-only bodies with html2text.
-# Parses the raw RFC 5322 bytes: himalaya v2.2.1's `message read --json` has no
-# headers/text/html fields, only mail-parser's internal structure.
+# Parses the raw RFC 5322 bytes, which read the same on every himalaya: the
+# `message read --json` view changed shape after v2.2.1 (pimalaya/himalaya@17068b4).
 _render_message() {
-  _hi message read --raw "$@" 2>/dev/null | python3 -I -c '
+  local raw
+  # himalaya prints its errors on stdout, so show one as is rather than parse it as a message.
+  raw=$(_hi message read --raw "$@" 2>/dev/null) || { print -r -- "$raw"; return 1; }
+  print -r -- "$raw" | python3 -I -c '
 import email, subprocess, sys
 from email import policy
 m = email.message_from_binary_file(sys.stdin.buffer, policy=policy.default)
@@ -92,7 +95,8 @@ for h in ("From", "To", "Cc", "Date", "Subject"):
     if m[h]:
         print(f"{h}: {m[h]}")
 for part in m.iter_attachments():
-    print(f"Attachment: {part.get_filename() or part.get_content_type()}")
+    size = len(part.get_payload(decode=True) or b"")
+    print(f"Attachment: {part.get_filename() or part.get_content_type()} ({size} bytes)")
 print()
 body = m.get_body(("plain", "html"))
 if body is None:
