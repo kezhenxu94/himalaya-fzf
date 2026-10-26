@@ -91,18 +91,17 @@ bar = (
     f"{rows}{'<div style=margin-top:6px>' + files + '</div>' if files else ''}</div>"
 )
 m = re.search(r"<body[^>]*>", content, flags=re.I)
-page = content[: m.end()] + bar + content[m.end() :] if m else "<meta charset='utf-8'>" + bar + content
+page = content[: m.end()] + bar + content[m.end() :] if m else bar + content
 # Block scripts, frames and tracking: only local files load unless remote images are asked for.
 remote = " https: http:" if remote_images else ""
 csp = (
     "default-src 'none'; script-src 'none'; frame-src 'none'; form-action 'none'; "
     f"img-src 'self' file: data:{remote}; style-src 'self' 'unsafe-inline' file:{remote}; font-src 'self' file: data:{remote}"
 )
-meta = f'<meta http-equiv="Content-Security-Policy" content="{csp}">'
-# Inside <head> when there is one; never before <!DOCTYPE>, which would force quirks mode.
-m = re.search(r"<head[^>]*>", page, flags=re.I) or re.search(r"<!doctype[^>]*>", page, flags=re.I)
-page = page[: m.end()] + meta + page[m.end() :] if m else meta + page
-open(os.path.join(out, "message.html"), "w").write(page)
+# The policy goes first, ahead of any email markup, so nothing in the email can run before it.
+head = f'<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{csp}">'
+page = head + re.sub(r"<!doctype[^>]*>", "", page, flags=re.I)
+open(os.path.join(out, "message.html"), "w", encoding="utf-8").write(page)
 PY
 
 if [ -n "${HIF_BROWSER:-}" ]; then
