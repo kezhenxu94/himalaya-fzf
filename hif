@@ -284,7 +284,7 @@ _browse_mailboxes() {
     --bind="ctrl-n:execute(source $SCRIPT_FILE && _compose compose)+reload($list)" \
     --bind="ctrl-a:become(source $SCRIPT_FILE && _browse_accounts)" \
     --bind="esc:become(source $SCRIPT_FILE && _show_main_menu)" \
-    --preview="source $SCRIPT_FILE && _hi envelope list -m {1} -s 30 -w \$FZF_PREVIEW_COLUMNS"
+    --preview="source $SCRIPT_FILE && { [[ {1} == \"\$GMAIL_ALL_MAIL\" ]] && export HIF_BACKEND=imap; _hi envelope list -m {1} -s 30 -w \$FZF_PREVIEW_COLUMNS; }"
 }
 
 _browse_envelopes() {
