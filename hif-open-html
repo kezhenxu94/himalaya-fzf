@@ -10,6 +10,7 @@
 # as a .txt copy), marks the email as read, and opens the page with $HIF_BROWSER
 # (default open/xdg-open).
 # Scripts never run; remote images load only with HIF_REMOTE_IMAGES=1.
+# HIF_SAVE_ATTACHMENTS=0 saves no attachments or inline images: the bar only lists them.
 
 set -euo pipefail
 
@@ -48,11 +49,11 @@ if ! RUST_LOG="${RUST_LOG:-error}" himalaya message read -a "$account" ${mailbox
   exit 1
 fi
 
-python3 -I - "$dir" "${HIF_REMOTE_IMAGES:-0}" <<'PY'
+python3 -I - "$dir" "${HIF_REMOTE_IMAGES:-0}" "${HIF_SAVE_ATTACHMENTS:-1}" <<'PY'
 import email, html, os, re, sys
 from email import policy
 
-out, remote_images = sys.argv[1], sys.argv[2] == "1"
+out, remote_images, save = sys.argv[1], sys.argv[2] == "1", sys.argv[3] != "0"
 msg = email.message_from_binary_file(open(os.path.join(out, "message.eml"), "rb"), policy=policy.default)
 
 
@@ -67,7 +68,8 @@ def safe_name(name, used):
     return candidate
 
 
-# Save every non-body part: real attachments and inline images (Content-ID).
+# Save every non-body part: real attachments and inline images (Content-ID). Unsaved, inline
+# images keep their cid: links, which the CSP below does not load.
 body = msg.get_body(("html", "plain"))
 used, links, cids = set(), [], {}
 for part in msg.walk():
@@ -78,9 +80,10 @@ for part in msg.walk():
         continue
     ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif"}.get(part.get_content_type(), "")
     name = safe_name(part.get_filename() or f"part{len(used) + 1}{ext}", used)
-    open(os.path.join(out, name), "wb").write(data)
+    if save:
+        open(os.path.join(out, name), "wb").write(data)
     cid = (part["Content-ID"] or "").strip("<> ")
-    if cid:
+    if cid and save:
         cids[cid] = name
     if part.get_content_disposition() == "attachment" or (part.get_filename() and not cid):
         ctype = part.get_content_type()
@@ -105,6 +108,8 @@ VIEWABLE = {".pdf", ".txt", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 def attachment(name, size, is_text):
     label = f"📎 {html.escape(name)} ({size // 1024 or 1} KB"
+    if not save:
+        return f"{label}, not saved)"
     if os.path.splitext(name)[1].lower() in VIEWABLE:
         return f"<a href='{html.escape(name)}' target='_blank'>{label})</a>"
     if is_text:
@@ -115,7 +120,7 @@ def attachment(name, size, is_text):
 
 
 files = " ".join(attachment(*link) for link in links)
-if files:
+if files and save:
     files += f"<div style='color:#666'>Saved in {html.escape(out)}</div>"
 bar = (
     "<div style='font:14px system-ui,sans-serif;background:#f3f3f3;color:#222;"
